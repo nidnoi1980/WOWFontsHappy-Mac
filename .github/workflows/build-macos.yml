@@ -21,26 +21,22 @@ jobs:
       - name: Checkout port repository
         uses: actions/checkout@v4
 
-      - name: Download upstream v1.1 source
+      - name: Clone upstream v1.1 source
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p _upstream
-          curl -fL --retry 3 \
-            -o _upstream/upstream.zip \
-            https://github.com/huchang47/WOWFontsHappy/archive/refs/tags/v1.1.zip
-          unzip -q _upstream/upstream.zip -d _upstream
-          SRC_DIR="$(find _upstream -mindepth 1 -maxdepth 1 -type d | head -n 1)"
-          test -n "$SRC_DIR"
-          echo "SRC_DIR=$SRC_DIR" >> "$GITHUB_ENV"
-          echo "Using upstream source: $SRC_DIR"
+          git clone --quiet --depth 1 --branch v1.1 \
+            https://github.com/huchang47/WOWFontsHappy.git \
+            _upstream/source
+          echo "SRC_DIR=$GITHUB_WORKSPACE/_upstream/source" >> "$GITHUB_ENV"
+          echo "Using upstream source: $GITHUB_WORKSPACE/_upstream/source"
 
       - name: Apply macOS port patches
         shell: bash
         run: |
           set -euo pipefail
           cd "$SRC_DIR"
-          git init -q
           git apply "$GITHUB_WORKSPACE/patches/01-newfiles.patch"
           git apply "$GITHUB_WORKSPACE/patches/02-server.patch"
           git apply "$GITHUB_WORKSPACE/patches/03-ui.patch"
