@@ -1,0 +1,414 @@
+diff --git a/server.js b/server.js
+index 351089c..9c65197 100644
+--- a/server.js
++++ b/server.js
+@@ -6,7 +6,7 @@ const os = require('os');
+ const fontkit = require('fontkit');
+ 
+ const app = express();
+-const PORT = 3456;
++const DEFAULT_PORT = Number.parseInt(process.env.PORT || '3456', 10);
+ 
+ app.use(express.json({ charset: 'utf-8' }));
+ 
+@@ -21,8 +21,25 @@ app.get('/', (req, res) => {
+ // 静态文件服务（禁用默认 index）
+ app.use(express.static(publicDir, { index: false }));
+ 
+-const SYSTEM_FONT_DIR = 'C:\\Windows\\Fonts';
+-const USER_FONT_DIR = path.join(os.homedir(), 'AppData', 'Local', 'Microsoft', 'Windows', 'Fonts');
++const PLATFORM = os.platform();
++const IS_WINDOWS = PLATFORM === 'win32';
++const IS_MAC = PLATFORM === 'darwin';
++
++// Windows 路径保持原项目逻辑；macOS 仅增加独立分支。
++const WINDOWS_SYSTEM_FONT_DIR = 'C:\\Windows\\Fonts';
++const WINDOWS_USER_FONT_DIR = path.join(os.homedir(), 'AppData', 'Local', 'Microsoft', 'Windows', 'Fonts');
++const MAC_FONT_DIRS = [
++    '/System/Library/Fonts',
++    '/Library/Fonts',
++    path.join(os.homedir(), 'Library', 'Fonts')
++];
++
++// 保留原变量名，避免影响 Windows 现有逻辑。
++const SYSTEM_FONT_DIR = IS_WINDOWS ? WINDOWS_SYSTEM_FONT_DIR : MAC_FONT_DIRS[0];
++const USER_FONT_DIR = IS_WINDOWS ? WINDOWS_USER_FONT_DIR : MAC_FONT_DIRS[2];
++
++// macOS 的字体可能位于系统字体目录的子目录中，用索引记录实际文件位置。
++const macFontFileIndex = new Map();
+ 
+ const WOW_FONT_MAP = {
+     zhCN: [
+@@ -127,6 +144,8 @@ function getFontFamilyNameFromFile(fontPath) {
+ 
+ // 从注册表读取字体名称（作为后备）
+ function readRegistryFontNames() {
++    // macOS 没有 Windows 字体注册表。Windows 分支保持原实现。
++    if (!IS_WINDOWS) return {};
+     try {
+         const output = execSync(
+             `powershell -Command "$props = Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Fonts'; $props.PSObject.Properties | Where-Object { $_.Name -notlike 'PS*' } | ForEach-Object { '{0}|{1}' -f $_.Name, $_.Value }"`,
+@@ -155,32 +174,56 @@ function readRegistryFontNames() {
+     }
+ }
+ 
++function expandHome(p) {
++    if (!p || typeof p !== 'string') return p;
++    if (p === '~') return os.homedir();
++    if (p.startsWith('~/') || p.startsWith('~\\')) {
++        return path.join(os.homedir(), p.slice(2));
++    }
++    return p;
++}
++
+ function safePath(p) {
+-    return Buffer.from(p, 'utf-8').toString('utf-8');
++    return Buffer.from(expandHome(p), 'utf-8').toString('utf-8');
+ }
+ 
+ // 查找字体文件（同时搜索自定义目录、系统目录和用户目录）
+ function findFontFile(filename, customDir) {
+     // 如果指定了自定义目录，优先从自定义目录查找
+     if (customDir) {
+-        let filePath = path.join(customDir, filename);
++        const normalizedCustomDir = expandHome(customDir);
++        let filePath = path.join(normalizedCustomDir, filename);
+         if (fs.existsSync(filePath)) {
+             return filePath;
+         }
+     }
+-    
+-    // 然后尝试系统字体目录
+-    let filePath = path.join(SYSTEM_FONT_DIR, filename);
+-    if (fs.existsSync(filePath)) {
+-        return filePath;
++
++    if (IS_WINDOWS) {
++        // Windows：保持原项目查找顺序不变。
++        let filePath = path.join(SYSTEM_FONT_DIR, filename);
++        if (fs.existsSync(filePath)) {
++            return filePath;
++        }
++
++        filePath = path.join(USER_FONT_DIR, filename);
++        if (fs.existsSync(filePath)) {
++            return filePath;
++        }
++        return null;
+     }
+-    
+-    // 最后尝试用户字体目录
+-    filePath = path.join(USER_FONT_DIR, filename);
+-    if (fs.existsSync(filePath)) {
+-        return filePath;
++
++    if (IS_MAC) {
++        // macOS：优先使用扫描时生成的索引，以支持系统字体子目录。
++        const indexed = macFontFileIndex.get(filename.toLowerCase());
++        if (indexed && fs.existsSync(indexed)) return indexed;
++
++        // 索引不存在时，再检查三个标准字体目录的根目录。
++        for (const fontDir of MAC_FONT_DIRS) {
++            const filePath = path.join(fontDir, filename);
++            if (fs.existsSync(filePath)) return filePath;
++        }
+     }
+-    
++
+     return null;
+ }
+ 
+@@ -246,21 +289,77 @@ function scanFontDirectory(fontDir, registryNames) {
+     return fonts;
+ }
+ 
++// macOS 系统字体目录中包含子目录，因此单独递归扫描；Windows 扫描函数不变。
++function scanMacFontDirectory(fontDir) {
++    const fonts = [];
++    const fontExtensions = ['.ttf', '.otf', '.ttc'];
++    if (!fs.existsSync(fontDir)) return fonts;
++
++    const stack = [fontDir];
++    while (stack.length > 0) {
++        const currentDir = stack.pop();
++        let entries;
++        try {
++            entries = fs.readdirSync(currentDir, { withFileTypes: true });
++        } catch {
++            continue;
++        }
++
++        for (const entry of entries) {
++            const filePath = path.join(currentDir, entry.name);
++            if (entry.isDirectory()) {
++                stack.push(filePath);
++                continue;
++            }
++            if (!entry.isFile() && !entry.isSymbolicLink()) continue;
++
++            const ext = path.extname(entry.name).toLowerCase();
++            if (!fontExtensions.includes(ext)) continue;
++
++            let stat;
++            try {
++                stat = fs.statSync(filePath);
++            } catch {
++                continue;
++            }
++
++            let displayName = getFontFamilyNameFromFile(filePath);
++            if (!displayName) displayName = path.basename(entry.name, ext);
++
++            // 前端仍使用原项目的 filename 作为选择键；同名字体以先扫描到的为准。
++            const indexKey = entry.name.toLowerCase();
++            if (!macFontFileIndex.has(indexKey)) {
++                macFontFileIndex.set(indexKey, filePath);
++                fonts.push({
++                    filename: entry.name,
++                    displayName,
++                    size: stat.size,
++                    extension: ext
++                });
++            }
++        }
++    }
++    return fonts;
++}
++
+ app.get('/api/system-fonts', (req, res) => {
+     try {
+         const registryNames = readRegistryFontNames();
+-        const customDir = req.query.customDir;
+-        
++        const customDir = req.query.customDir ? expandHome(req.query.customDir) : null;
++
+         let fonts = [];
+-        
++
+         if (customDir && fs.existsSync(customDir)) {
+-            // 使用自定义字体目录
++            // 自定义目录保持原项目的单层扫描行为。
+             fonts = scanFontDirectory(customDir, registryNames);
++        } else if (IS_MAC) {
++            macFontFileIndex.clear();
++            for (const fontDir of MAC_FONT_DIRS) {
++                fonts = fonts.concat(scanMacFontDirectory(fontDir));
++            }
+         } else {
+-            // 扫描系统字体目录
++            // Windows：保持原项目逻辑不变。
+             fonts = scanFontDirectory(SYSTEM_FONT_DIR, registryNames);
+-            
+-            // 扫描用户字体目录
+             const userFonts = scanFontDirectory(USER_FONT_DIR, registryNames);
+             fonts = fonts.concat(userFonts);
+         }
+@@ -273,8 +372,8 @@ app.get('/api/system-fonts', (req, res) => {
+ });
+ 
+ app.get('/api/preview-font/:filename', (req, res) => {
+-    const customDir = req.query.customDir;
+-    
++    const customDir = req.query.customDir ? expandHome(req.query.customDir) : null;
++
+     // 如果指定了自定义目录，优先从自定义目录查找
+     if (customDir && fs.existsSync(customDir)) {
+         const filePath = path.join(customDir, req.params.filename);
+@@ -282,22 +381,47 @@ app.get('/api/preview-font/:filename', (req, res) => {
+             return res.sendFile(filePath);
+         }
+     }
+-    
+-    // 首先尝试从系统字体目录查找
+-    let filePath = path.join(SYSTEM_FONT_DIR, req.params.filename);
+-    if (fs.existsSync(filePath)) {
+-        return res.sendFile(filePath);
+-    }
+-    
+-    // 如果系统目录没有，尝试从用户字体目录查找
+-    filePath = path.join(USER_FONT_DIR, req.params.filename);
+-    if (fs.existsSync(filePath)) {
+-        return res.sendFile(filePath);
++
++    if (IS_WINDOWS) {
++        // Windows：保持原项目查找顺序不变。
++        let filePath = path.join(SYSTEM_FONT_DIR, req.params.filename);
++        if (fs.existsSync(filePath)) {
++            return res.sendFile(filePath);
++        }
++
++        filePath = path.join(USER_FONT_DIR, req.params.filename);
++        if (fs.existsSync(filePath)) {
++            return res.sendFile(filePath);
++        }
++    } else if (IS_MAC) {
++        const filePath = findFontFile(req.params.filename, null);
++        if (filePath) return res.sendFile(filePath);
+     }
+-    
++
+     res.status(404).json({ error: 'Font not found' });
+ });
+ 
++// 前端根据这里返回的分隔符拼接路径，Windows 仍使用反斜杠，macOS 使用正斜杠。
++app.get('/api/platform', (req, res) => {
++    const suggestedWowPath = IS_MAC
++        ? '/Applications/World of Warcraft'
++        : 'C:\\Program Files (x86)\\World of Warcraft';
++    const suggestedCustomFontPath = IS_MAC
++        ? path.join(os.homedir(), 'Library', 'Fonts')
++        : 'D:\\Fonts';
++
++    res.json({
++        success: true,
++        platform: PLATFORM,
++        isWindows: IS_WINDOWS,
++        isMac: IS_MAC,
++        separator: path.sep,
++        suggestedWowPath,
++        suggestedCustomFontPath,
++        systemFontDirs: IS_MAC ? MAC_FONT_DIRS : [SYSTEM_FONT_DIR, USER_FONT_DIR]
++    });
++});
++
+ app.get('/api/wow-versions', (req, res) => {
+     res.json({ success: true, versions: WOW_VERSION_DIRS, fontMap: WOW_FONT_MAP });
+ });
+@@ -306,7 +430,12 @@ app.post('/api/detect-wow', (req, res) => {
+     const { searchPaths } = req.body;
+     const found = [];
+ 
+-    const commonPaths = searchPaths || [
++    const defaultPaths = IS_MAC ? [
++        '/Applications/World of Warcraft',
++        path.join(os.homedir(), 'Applications', 'World of Warcraft'),
++        path.join(os.homedir(), 'Games', 'World of Warcraft'),
++        '/Users/Shared/World of Warcraft'
++    ] : [
+         'C:\\Program Files (x86)\\World of Warcraft',
+         'C:\\Program Files\\World of Warcraft',
+         'D:\\World of Warcraft',
+@@ -315,7 +444,10 @@ app.post('/api/detect-wow', (req, res) => {
+         'E:\\Games\\World of Warcraft'
+     ];
+ 
+-    for (const basePath of commonPaths) {
++    const commonPaths = searchPaths || defaultPaths;
++
++    for (const rawBasePath of commonPaths) {
++        const basePath = expandHome(rawBasePath);
+         if (fs.existsSync(basePath)) {
+             const versions = [];
+             for (const ver of WOW_VERSION_DIRS) {
+@@ -359,7 +491,9 @@ app.post('/api/copy-fonts', (req, res) => {
+                 console.error('创建目录失败:', mkdirErr.message);
+                 return res.json({
+                     success: false,
+-                    error: `创建字体目录失败: ${mkdirErr.message}。请确保以管理员身份运行本工具，或手动在WoW目录中创建Fonts文件夹。`
++                    error: IS_WINDOWS
++                        ? `创建字体目录失败: ${mkdirErr.message}。请确保以管理员身份运行本工具，或手动在WoW目录中创建Fonts文件夹。`
++                        : `创建字体目录失败: ${mkdirErr.message}。请确认当前用户对WoW目录具有写入权限，或手动创建Fonts文件夹。`
+                 });
+             }
+         }
+@@ -414,7 +548,9 @@ app.post('/api/batch-copy', (req, res) => {
+                 console.error('创建目录失败:', mkdirErr.message);
+                 return res.json({
+                     success: false,
+-                    error: `创建字体目录失败: ${mkdirErr.message}。请确保以管理员身份运行本工具，或手动在WoW目录中创建Fonts文件夹。`
++                    error: IS_WINDOWS
++                        ? `创建字体目录失败: ${mkdirErr.message}。请确保以管理员身份运行本工具，或手动在WoW目录中创建Fonts文件夹。`
++                        : `创建字体目录失败: ${mkdirErr.message}。请确认当前用户对WoW目录具有写入权限，或手动创建Fonts文件夹。`
+                 });
+             }
+         }
+@@ -473,36 +609,60 @@ app.post('/api/clear-fonts', (req, res) => {
+     }
+ });
+ 
+-// 启动服务器
+-const server = app.listen(PORT, () => {
+-    const url = `http://localhost:${PORT}`;
+-    console.log('\n========================================');
+-    console.log('  魔兽字体好开心已启动！');
+-    console.log('========================================');
+-    console.log(`  服务地址: ${url}`);
+-    console.log(`  系统字体目录: ${SYSTEM_FONT_DIR}`);
+-    console.log('========================================\n');
+-    console.log('  正在自动打开浏览器...\n');
+-    
+-    // 延迟1秒后打开浏览器，确保服务器已完全启动
+-    setTimeout(() => {
+-        openBrowser(url);
+-    }, 1000);
+-});
++// 启动服务器。源码模式保持原行为；Electron 打包模式可关闭外部浏览器。
++function startServer(options = {}) {
++    const port = options.port ?? DEFAULT_PORT;
++    const host = options.host || '127.0.0.1';
++    const openBrowserOnStart = options.openBrowserOnStart !== false;
++    const installSignalHandlers = options.installSignalHandlers !== false;
++
++    return new Promise((resolve, reject) => {
++        let settled = false;
++        const server = app.listen(port, host, () => {
++            const address = server.address();
++            const actualPort = address && typeof address === 'object' ? address.port : port;
++            const url = `http://${host}:${actualPort}`;
++
++            console.log('\n========================================');
++            console.log('  魔兽字体好开心已启动！');
++            console.log('========================================');
++            console.log(`  服务地址: ${url}`);
++            console.log(`  运行平台: ${PLATFORM}`);
++            console.log(`  系统字体目录: ${IS_MAC ? MAC_FONT_DIRS.join(' | ') : SYSTEM_FONT_DIR}`);
++            console.log('========================================\n');
++
++            if (openBrowserOnStart) {
++                console.log('  正在自动打开浏览器...\n');
++                setTimeout(() => openBrowser(url), 1000);
++            }
++
++            if (installSignalHandlers) {
++                const shutdown = () => {
++                    console.log('\n正在关闭服务...');
++                    server.close(() => {
++                        console.log('服务已关闭');
++                        process.exit(0);
++                    });
++                };
++                process.once('SIGINT', shutdown);
++                process.once('SIGTERM', shutdown);
++            }
++
++            settled = true;
++            resolve({ server, url, port: actualPort });
++        });
+ 
+-// 优雅关闭
+-process.on('SIGINT', () => {
+-    console.log('\n正在关闭服务...');
+-    server.close(() => {
+-        console.log('服务已关闭');
+-        process.exit(0);
++        server.once('error', (err) => {
++            if (!settled) reject(err);
++        });
+     });
+-});
++}
+ 
+-process.on('SIGTERM', () => {
+-    console.log('\n正在关闭服务...');
+-    server.close(() => {
+-        console.log('服务已关闭');
+-        process.exit(0);
++if (require.main === module) {
++    startServer().catch((err) => {
++        console.error('启动失败:', err.message);
++        process.exit(1);
+     });
+-});
++}
++
++module.exports = { app, startServer };
