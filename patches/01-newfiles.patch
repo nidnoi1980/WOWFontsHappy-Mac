@@ -1,0 +1,258 @@
+diff --git a/.github/scripts/mac_smoke_test.js b/.github/scripts/mac_smoke_test.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..1d741c0f6c63a3876444ef69117980a915260cc9
+--- /dev/null
++++ b/.github/scripts/mac_smoke_test.js
+@@ -0,0 +1,92 @@
++'use strict';
++
++const fs = require('fs');
++const os = require('os');
++const path = require('path');
++
++function assert(condition, message) {
++  if (!condition) throw new Error(message);
++}
++
++async function jsonFetch(url, options = {}) {
++  const response = await fetch(url, {
++    ...options,
++    headers: {
++      'content-type': 'application/json',
++      ...(options.headers || {})
++    }
++  });
++  const data = await response.json();
++  if (!response.ok) throw new Error(`${response.status}: ${JSON.stringify(data)}`);
++  return data;
++}
++
++(async () => {
++  const { startServer } = require('../../server');
++  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'wowfontshappy-smoke-'));
++  const wowRoot = path.join(tempRoot, 'World of Warcraft');
++  const retailRoot = path.join(wowRoot, '_retail_');
++  const fontsRoot = path.join(retailRoot, 'Fonts');
++  const customFonts = path.join(tempRoot, 'Custom Fonts');
++  fs.mkdirSync(retailRoot, { recursive: true });
++  fs.mkdirSync(customFonts, { recursive: true });
++  fs.writeFileSync(path.join(customFonts, 'SmokeFont.ttf'), Buffer.from('WOWFontsHappy smoke test font data'));
++
++  let handle;
++  try {
++    handle = await startServer({
++      port: 0,
++      host: '127.0.0.1',
++      openBrowserOnStart: false,
++      installSignalHandlers: false
++    });
++
++    const platform = await jsonFetch(`${handle.url}/api/platform`);
++    assert(platform.success, 'platform API failed');
++    assert(platform.platform === process.platform, `platform mismatch: ${platform.platform}`);
++    if (process.platform === 'darwin') assert(platform.isMac === true, 'macOS was not detected');
++
++    const detected = await jsonFetch(`${handle.url}/api/detect-wow`, {
++      method: 'POST',
++      body: JSON.stringify({ searchPaths: [wowRoot] })
++    });
++    assert(detected.success, 'detect API failed');
++    assert(detected.installations.length === 1, 'fake WoW installation not detected');
++    assert(detected.installations[0].versions.some(v => v.key === '_retail_'), '_retail_ not detected');
++
++    const copied = await jsonFetch(`${handle.url}/api/batch-copy`, {
++      method: 'POST',
++      body: JSON.stringify({
++        sourceFont: 'SmokeFont.ttf',
++        wowFontsPath: fontsRoot,
++        locale: 'zhCN',
++        customDir: customFonts
++      })
++    });
++    assert(copied.success, 'batch copy API failed');
++    assert(copied.results.length === 5, `expected 5 zhCN mappings, got ${copied.results.length}`);
++    assert(copied.results.every(x => x.success), 'one or more font copies failed');
++
++    const expected = ['FRIZQT__.TTF', 'ARIALN.TTF', 'ARHei.TTF', 'ARKai_C.TTF', 'ARKai_T.TTF'];
++    for (const filename of expected) {
++      assert(fs.existsSync(path.join(fontsRoot, filename)), `missing output: ${filename}`);
++    }
++
++    const cleared = await jsonFetch(`${handle.url}/api/clear-fonts`, {
++      method: 'POST',
++      body: JSON.stringify({ wowFontsPath: fontsRoot })
++    });
++    assert(cleared.success, 'clear API failed');
++    assert(cleared.deleted === 5, `expected 5 deleted files, got ${cleared.deleted}`);
++
++    console.log('[OK] macOS path/API smoke test passed.');
++  } finally {
++    if (handle && handle.server) {
++      await new Promise(resolve => handle.server.close(resolve));
++    }
++    fs.rmSync(tempRoot, { recursive: true, force: true });
++  }
++})().catch(err => {
++  console.error('[ERROR]', err.stack || err);
++  process.exit(1);
++});
+diff --git a/START_MAC.command b/START_MAC.command
+new file mode 100755
+index 0000000000000000000000000000000000000000..e438a3887c2258302de7c7bb4f679f9ba94343ea
+--- /dev/null
++++ b/START_MAC.command
+@@ -0,0 +1,34 @@
++#!/bin/bash
++set -u
++cd "$(dirname "$0")"
++
++echo "========================================"
++echo "  WoWFontsHappy macOS Source Launcher"
++echo "========================================"
++
++if ! command -v node >/dev/null 2>&1; then
++  echo "[ERROR] Node.js was not found."
++  echo "Install Node.js 18+ first, then run this file again."
++  echo
++  read -r -p "Press Enter to close..."
++  exit 1
++fi
++
++echo "Node version: $(node --version)"
++echo "npm version:  $(npm --version)"
++
++if [ ! -d node_modules ]; then
++  echo
++  echo "Installing dependencies for the first run..."
++  npm ci || {
++    echo "[ERROR] npm ci failed."
++    read -r -p "Press Enter to close..."
++    exit 1
++  }
++fi
++
++echo
++echo "Starting WoWFontsHappy..."
++echo "Keep this Terminal window open while using the app."
++echo
++node server.js
+diff --git a/electron-main.js b/electron-main.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..b46334331846726a52be624d8fb573565ed2ffad
+--- /dev/null
++++ b/electron-main.js
+@@ -0,0 +1,114 @@
++'use strict';
++
++const { app, BrowserWindow, dialog, shell } = require('electron');
++const path = require('path');
++
++let mainWindow = null;
++let serverHandle = null;
++let isQuitting = false;
++
++const gotLock = app.requestSingleInstanceLock();
++if (!gotLock) {
++  app.quit();
++}
++
++async function createMainWindow() {
++  if (mainWindow && !mainWindow.isDestroyed()) {
++    mainWindow.show();
++    mainWindow.focus();
++    return;
++  }
++
++  const { startServer } = require('./server');
++
++  if (!serverHandle) {
++    try {
++      serverHandle = await startServer({
++        port: 3456,
++        host: '127.0.0.1',
++        openBrowserOnStart: false,
++        installSignalHandlers: false
++      });
++    } catch (err) {
++      dialog.showErrorBox(
++        '魔兽字体好开心启动失败',
++        `本地服务无法启动。\n\n${err && err.message ? err.message : String(err)}`
++      );
++      app.quit();
++      return;
++    }
++  }
++
++  mainWindow = new BrowserWindow({
++    width: 1320,
++    height: 860,
++    minWidth: 1050,
++    minHeight: 700,
++    show: false,
++    title: '魔兽字体好开心',
++    backgroundColor: '#f5f5f5',
++    webPreferences: {
++      nodeIntegration: false,
++      contextIsolation: true,
++      sandbox: true
++    }
++  });
++
++  mainWindow.removeMenu();
++
++  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
++    if (/^https?:/i.test(url) && !url.startsWith(serverHandle.url)) {
++      shell.openExternal(url);
++    }
++    return { action: 'deny' };
++  });
++
++  mainWindow.webContents.on('will-navigate', (event, url) => {
++    if (!url.startsWith(serverHandle.url)) {
++      event.preventDefault();
++      if (/^https?:/i.test(url)) shell.openExternal(url);
++    }
++  });
++
++  mainWindow.once('ready-to-show', () => {
++    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.show();
++  });
++
++  mainWindow.on('closed', () => {
++    mainWindow = null;
++    if (!isQuitting) app.quit();
++  });
++
++  await mainWindow.loadURL(serverHandle.url);
++}
++
++if (gotLock) {
++  app.on('second-instance', () => {
++    if (mainWindow && !mainWindow.isDestroyed()) {
++      if (mainWindow.isMinimized()) mainWindow.restore();
++      mainWindow.show();
++      mainWindow.focus();
++    }
++  });
++
++  app.whenReady().then(createMainWindow);
++
++  app.on('activate', () => {
++    if (!mainWindow) createMainWindow();
++  });
++
++  app.on('before-quit', () => {
++    isQuitting = true;
++    if (serverHandle && serverHandle.server) {
++      try {
++        serverHandle.server.close();
++      } catch (_) {
++        // Ignore shutdown errors.
++      }
++    }
++  });
++
++  app.on('window-all-closed', () => {
++    app.quit();
++  });
++}
