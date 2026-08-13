@@ -1,0 +1,89 @@
+diff --git a/package.json b/package.json
+index 0725f81..f3557d9 100644
+--- a/package.json
++++ b/package.json
+@@ -1,12 +1,14 @@
+ {
+   "name": "wowfontshappy",
+-  "version": "1.0.0",
+-  "description": "魔兽字体好开心 - 浏览系统字体，一键替换WoW字体",
+-  "main": "server.js",
++  "version": "1.3.0",
++  "description": "魔兽字体好开心 - Windows/macOS 双平台版，支持 macOS .app 打包",
++  "main": "electron-main.js",
+   "bin": "server.js",
+   "scripts": {
+     "start": "node server.js",
+-    "build": "pkg . --targets node18-win-x64 --output WoWFontsHappy.exe"
++    "check": "node --check server.js && node --check electron-main.js",
++    "build:win": "python .github/scripts/build_full.py",
++    "build:mac": "electron-builder --mac --x64 --arm64"
+   },
+   "pkg": {
+     "assets": [
+@@ -16,5 +18,46 @@
+   "dependencies": {
+     "express": "^5.2.1",
+     "fontkit": "^2.0.4"
++  },
++  "build": {
++    "appId": "com.wowfontshappy.app",
++    "productName": "魔兽字体好开心",
++    "electronVersion": "37.2.4",
++    "asar": true,
++    "directories": {
++      "output": "dist-mac"
++    },
++    "files": [
++      "electron-main.js",
++      "server.js",
++      "public/**/*",
++      "package.json",
++      "LICENSE"
++    ],
++    "mac": {
++      "icon": "FontsHappy.png",
++      "category": "public.app-category.utilities",
++      "identity": null,
++      "target": [
++        {
++          "target": "dmg",
++          "arch": [
++            "x64",
++            "arm64"
++          ]
++        },
++        {
++          "target": "zip",
++          "arch": [
++            "x64",
++            "arm64"
++          ]
++        }
++      ]
++    },
++    "dmg": {
++      "title": "魔兽字体好开心 ${version} (${arch})"
++    },
++    "artifactName": "WoWFontsHappy-${version}-macOS-${arch}.${ext}"
+   }
+ }
+diff --git a/package-lock.json b/package-lock.json
+index 27de9a5..3fe1fc9 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -1,12 +1,12 @@
+ {
+   "name": "wowfontshappy",
+-  "version": "1.0.0",
++  "version": "1.3.0",
+   "lockfileVersion": 3,
+   "requires": true,
+   "packages": {
+     "": {
+       "name": "wowfontshappy",
+-      "version": "1.0.0",
++      "version": "1.3.0",
+       "dependencies": {
+         "express": "^5.2.1",
+         "fontkit": "^2.0.4"
