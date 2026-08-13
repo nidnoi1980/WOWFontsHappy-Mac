@@ -81,7 +81,7 @@ jobs:
         run: |
           set -euo pipefail
           cd "$SRC_DIR"
-          npx electron-builder --mac --x64 --arm64
+          npx electron-builder --mac --x64 --arm64 --publish never
           echo "Build output:"
           find dist-mac -maxdepth 2 -type f -print
 
