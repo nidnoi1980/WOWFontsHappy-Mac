@@ -1,0 +1,111 @@
+diff --git a/public/index.html b/public/index.html
+index 7828674..666a835 100644
+--- a/public/index.html
++++ b/public/index.html
+@@ -126,7 +126,7 @@
+                     <h3>WoW安装路径</h3>
+                     <div class="form-row">
+                         <label>游戏根目录(所有版本)</label>
+-                        <input type="text" class="path-input" id="wowBasePath" placeholder="如: I:\World of Warcraft" onblur="checkManualPath()">
++                        <input type="text" class="path-input" id="wowBasePath" placeholder="正在读取系统路径格式..." onblur="checkManualPath()">
+                         <button class="btn btn-secondary btn-sm" onclick="checkManualPath()">检测路径</button>
+                     </div>
+                     <div id="wowVersions"></div>
+@@ -192,7 +192,7 @@
+                     </label>
+                 </div>
+                 <div id="customFontDirContainer" style="display: none; gap: 8px;">
+-                    <input type="text" id="customFontDir" placeholder="例如: D:\\我的字体\\收藏" style="flex: 1; padding: 6px 12px; background: var(--bg3); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 13px; outline: none;">
++                    <input type="text" id="customFontDir" placeholder="正在读取系统路径格式..." style="flex: 1; padding: 6px 12px; background: var(--bg3); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 13px; outline: none;">
+                     <button class="btn btn-sm btn-secondary" onclick="fillExamplePath()">示例</button>
+                     <button class="btn btn-sm btn-primary" onclick="applyCustomFontDir()">应用</button>
+                 </div>
+@@ -226,8 +226,41 @@
+         let isLoadingFonts = false;
+ 
+         const PREVIEW_TEXT = '123ABCabc魔兽世界';
++        let platformInfo = { platform: 'win32', separator: '\\', isWindows: true, isMac: false };
++
++        function joinPlatformPath() {
++            var parts = Array.prototype.slice.call(arguments);
++            var sep = platformInfo.separator || '\\';
++            if (parts.length === 0) return '';
++            var first = String(parts.shift() || '').replace(/[\\\/]+$/, '');
++            var rest = parts.map(function(part) {
++                return String(part || '').replace(/^[\\\/]+|[\\\/]+$/g, '');
++            }).filter(Boolean);
++            return [first].concat(rest).join(sep);
++        }
++
++        async function loadPlatformInfo() {
++            try {
++                var res = await fetch('/api/platform');
++                var data = await res.json();
++                if (data.success) {
++                    platformInfo = data;
++                    var wowInput = document.getElementById('wowBasePath');
++                    var customInput = document.getElementById('customFontDir');
++                    wowInput.placeholder = data.isMac
++                        ? '如: /Applications/World of Warcraft'
++                        : '如: I:\\World of Warcraft';
++                    customInput.placeholder = data.isMac
++                        ? '例如: ~/Library/Fonts 或 ~/Desktop/Fonts'
++                        : '例如: D:\\我的字体\\收藏';
++                }
++            } catch (e) {
++                console.log('无法读取运行平台信息，继续使用 Windows 路径规则');
++            }
++        }
+ 
+         async function init() {
++            await loadPlatformInfo();
+             // 加载保存的路径
+             loadSavedPath();
+             // 初始化拖拽调整大小
+@@ -352,13 +385,16 @@
+ 
+         // 填充示例路径
+         function fillExamplePath() {
+-            const examples = [
++            const examples = platformInfo.isMac ? [
++                '~/Library/Fonts',
++                '~/Desktop/Fonts',
++                '/Library/Fonts'
++            ] : [
+                 'D:\\我的字体\\收藏',
+-                'C:\\Users\\' + (navigator.userAgent.match(/Windows NT.*?;\s*(\w+)/)?.[1] || 'Username') + '\\Desktop\\字体',
++                'C:\\Users\\Username\\Desktop\\字体',
+                 'E:\\Fonts'
+             ];
+             const input = document.getElementById('customFontDir');
+-            // 如果输入框为空，填充第一个示例；否则循环切换
+             let currentIndex = examples.indexOf(input.value);
+             let nextIndex = (currentIndex + 1) % examples.length;
+             input.value = examples[nextIndex];
+@@ -664,7 +700,7 @@
+ 
+             for (var i = 0; i < versions.length; i++) {
+                 var ver = versions[i];
+-                var fontsPath = basePath + '\\' + ver + '\\Fonts';
++                var fontsPath = joinPlatformPath(basePath, ver, 'Fonts');
+                 try {
+                     var res = await fetch('/api/batch-copy', {
+                         method: 'POST',
+@@ -712,7 +748,7 @@
+ 
+             for (var i = 0; i < versions.length; i++) {
+                 var ver = versions[i];
+-                var fontsPath = basePath + '\\' + ver + '\\Fonts';
++                var fontsPath = joinPlatformPath(basePath, ver, 'Fonts');
+                 try {
+                     var res = await fetch('/api/copy-fonts', {
+                         method: 'POST',
+@@ -773,7 +809,7 @@
+                     var basePath = document.getElementById('wowBasePath').value.trim();
+                     var deleted = 0;
+                     for (var i = 0; i < versions.length; i++) {
+-                        var fontsPath = basePath + '\\' + versions[i] + '\\Fonts';
++                        var fontsPath = joinPlatformPath(basePath, versions[i], 'Fonts');
+                         try {
+                             var res = await fetch('/api/clear-fonts', {
+                                 method: 'POST',
